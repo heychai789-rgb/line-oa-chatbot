@@ -98,12 +98,14 @@ async def send_reply(reply_token: str, messages: list[dict]):
         "replyToken": reply_token,
         "messages": messages,
     }
+    # Debug: log payload เพื่อตรวจสอบว่า quickReply ถูกส่งไปจริง
+    logger.info(f"send_reply payload: {json.dumps(payload, ensure_ascii=False)}")
     async with httpx.AsyncClient() as client:
         response = await client.post(LINE_REPLY_URL, headers=headers, json=payload)
         if response.status_code != 200:
             logger.error(f"Reply failed: {response.status_code} - {response.text}")
         else:
-            logger.info("Reply sent successfully")
+            logger.info(f"Reply sent successfully: {response.text}")
 
 
 async def send_push(user_id: str, messages: list[dict]):
