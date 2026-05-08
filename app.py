@@ -113,13 +113,40 @@ async def send_push(user_id: str, messages: list[dict]):
             logger.info("Push sent successfully")
 
 
-async def send_telegram_notification(display_name: str, customer_message: str):
+async def get_line_display_name(user_id: str) -> str:
+    """ดึง display name ของลูกค้าจาก LINE Messaging API."""
+    try:
+        headers = {
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{LINE_API_BASE}/profile/{user_id}",
+                headers=headers,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                display_name = data.get("displayName", user_id)
+                logger.info(f"Got display name for {user_id}: {display_name}")
+                return display_name
+            else:
+                logger.warning(f"Could not get display name for {user_id}: {response.status_code}")
+                return user_id
+    except Exception as e:
+        logger.error(f"Error getting display name for {user_id}: {e}")
+        return user_id
+
+
+async def send_telegram_notification(user_id: str, customer_message: str):
     """ส่งแจ้งเตือน Telegram เมื่อ AI ตอบลูกค้า."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Telegram credentials not configured, skipping notification")
         return
     
     try:
+        # ดึง display name จาก LINE API (ถ้าไม่ได้จะ fallback เป็น user_id)
+        display_name = await get_line_display_name(user_id)
+        
         # สร้างข้อความแจ้งเตือน
         notification_text = (
             f"🔔 มีลูกค้าทักมา\n"
@@ -140,7 +167,7 @@ async def send_telegram_notification(display_name: str, customer_message: str):
             if response.status_code != 200:
                 logger.error(f"Telegram notification failed: {response.status_code} - {response.text}")
             else:
-                logger.info(f"Telegram notification sent successfully")
+                logger.info(f"Telegram notification sent for {display_name}")
     except Exception as e:
         logger.error(f"Error sending Telegram notification: {e}")
 
