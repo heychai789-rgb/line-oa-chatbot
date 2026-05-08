@@ -428,7 +428,46 @@ async def handle_greeting(reply_token: str, user_id: str, customer_message: str 
     """กรณีที่ 1: ทักทาย / สติ๊กเกอร์ / ข้อความทั่วไป."""
     messages = [
         {"type": "text", "text": "สวัสดีคะพี่ หนูลินดายินดีให้บริการ"},
-        {"type": "text", "text": "ไม่ทราบว่าคุณพี่ต้องการทำรายการด้านใดคะ"},
+        {
+            "type": "text",
+            "text": "ไม่ทราบว่าคุณพี่ต้องการทำรายการด้านใดคะ",
+            "quickReply": {
+                "items": [
+                    {
+                        "type": "action",
+                        "action": {
+                            "type": "message",
+                            "label": "💰 ฝากเงิน",
+                            "text": "ฝากเงิน",
+                        },
+                    },
+                    {
+                        "type": "action",
+                        "action": {
+                            "type": "message",
+                            "label": "💸 ถอนเงิน",
+                            "text": "ถอนเงิน",
+                        },
+                    },
+                    {
+                        "type": "action",
+                        "action": {
+                            "type": "message",
+                            "label": "🎮 เล่นเกม",
+                            "text": "เล่นเกม",
+                        },
+                    },
+                    {
+                        "type": "action",
+                        "action": {
+                            "type": "message",
+                            "label": "👩‍💼 ติดต่อแอดมิน",
+                            "text": "ติดต่อแอดมิน",
+                        },
+                    },
+                ]
+            },
+        },
     ]
     await send_reply(reply_token, messages)
     await mark_chat_as_follow_up(user_id)
