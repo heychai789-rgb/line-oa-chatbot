@@ -5,6 +5,7 @@ AI Chatbot สำหรับ Line Official Account
 """
 
 import os
+import asyncio
 import hashlib
 import hmac
 import base64
@@ -39,6 +40,16 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Chat state manager
 state_manager = ChatStateManager()
+
+# Per-user asyncio locks เพื่อป้องกัน race condition (bot ตอบซ้ำ)
+_user_locks: dict[str, asyncio.Lock] = {}
+
+
+def get_user_lock(user_id: str) -> asyncio.Lock:
+    """ดึง asyncio.Lock สำหรับ user แต่ละคน (สร้างใหม่ถ้ายังไม่มี)."""
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
 
 
 @asynccontextmanager
@@ -303,48 +314,51 @@ async def handle_message_event(event: dict):
     message = event.get("message", {})
     message_type = message.get("type", "")
     
-    # ตรวจสอบสถานะแชท - ถ้ามีสถานะอยู่แล้ว ไม่ต้องตอบ
-    current_status = state_manager.get_status(user_id)
-    if current_status in ["follow_up", "resolved"]:
-        logger.info(f"User {user_id} already has status '{current_status}', skipping.")
-        return
-    
-    # กรณีเป็น sticker → จัดเป็นกรณีที่ 1 (greeting)
-    if message_type == "sticker":
-        logger.info(f"Sticker received from {user_id}")
-        await handle_greeting(reply_token, user_id, "สติ๊กเกอร์")
-        return
-    
-    # กรณีเป็น text message
-    if message_type == "text":
-        text = message.get("text", "").strip()
-        logger.info(f"Text received from {user_id}: {text}")
-        
-        if not text:
-            await handle_greeting(reply_token, user_id, "ข้อความว่าง")
+    # ใช้ per-user lock เพื่อป้องกัน race condition กรณี LINE ส่ง event ซ้ำหรือพร้อมกัน
+    lock = get_user_lock(user_id)
+    async with lock:
+        # ตรวจสอบสถานะแชท - ถ้ามีสถานะอยู่แล้ว ไม่ต้องตอบ
+        current_status = state_manager.get_status(user_id)
+        if current_status in ["follow_up", "resolved"]:
+            logger.info(f"User {user_id} already has status '{current_status}', skipping.")
             return
         
-        # ตรวจสอบคีย์เวิร์ดก่อน (เร็วกว่า API call)
-        category = check_keywords(text)
+        # กรณีเป็น sticker → จัดเป็นกรณีที่ 1 (greeting)
+        if message_type == "sticker":
+            logger.info(f"Sticker received from {user_id}")
+            await handle_greeting(reply_token, user_id, "สติ๊กเกอร์")
+            return
         
-        # ถ้าไม่ match คีย์เวิร์ด ใช้ AI จำแนก
-        if category is None:
-            category = await classify_message(text)
+        # กรณีเป็น text message
+        if message_type == "text":
+            text = message.get("text", "").strip()
+            logger.info(f"Text received from {user_id}: {text}")
+            
+            if not text:
+                await handle_greeting(reply_token, user_id, "ข้อความว่าง")
+                return
+            
+            # ตรวจสอบคีย์เวิร์ดก่อน (เร็วกว่า API call)
+            category = check_keywords(text)
+            
+            # ถ้าไม่ match คีย์เวิร์ด ใช้ AI จำแนก
+            if category is None:
+                category = await classify_message(text)
+            
+            # จัดการตามประเภท
+            if category == "greeting":
+                await handle_greeting(reply_token, user_id, text)
+            elif category == "transaction":
+                await handle_transaction(reply_token, user_id, text)
+            elif category == "angry":
+                await handle_angry(reply_token, user_id, text)
+            else:
+                await handle_greeting(reply_token, user_id, text)
+            return
         
-        # จัดการตามประเภท
-        if category == "greeting":
-            await handle_greeting(reply_token, user_id, text)
-        elif category == "transaction":
-            await handle_transaction(reply_token, user_id, text)
-        elif category == "angry":
-            await handle_angry(reply_token, user_id, text)
-        else:
-            await handle_greeting(reply_token, user_id, text)
-        return
-    
-    # กรณีอื่นๆ (image, video, audio, location, etc.) → จัดเป็น greeting
-    logger.info(f"Other message type '{message_type}' from {user_id}")
-    await handle_greeting(reply_token, user_id, f"{message_type} message")
+        # กรณีอื่นๆ (image, video, audio, location, etc.) → จัดเป็น greeting
+        logger.info(f"Other message type '{message_type}' from {user_id}")
+        await handle_greeting(reply_token, user_id, f"{message_type} message")
 
 
 def check_keywords(text: str) -> str | None:
@@ -469,23 +483,16 @@ async def webhook(request: Request):
         if event_type == "message":
             await handle_message_event(event)
         elif event_type == "follow":
-            # ลูกค้า add friend
+            # ลูกค้า add friend → ignore ไม่ตอบอัตโนมัติ
             user_id = event["source"]["userId"]
-            reply_token = event["replyToken"]
-            logger.info(f"New follower: {user_id}")
-            # ส่งข้อความต้อนรับ
-            messages = [
-                {"type": "text", "text": "สวัสดีคะพี่ หนูลินดายินดีให้บริการ"},
-                {"type": "text", "text": "ไม่ทราบว่าคุณพี่ต้องการทำรายการด้านใดคะ"},
-            ]
-            await send_reply(reply_token, messages)
+            logger.info(f"Follow event received for {user_id} - ignored (no auto-reply)")
         elif event_type == "unfollow":
-            # ลูกค้า block
+            # ลูกค้า block → ลบสถานะออก
             user_id = event["source"]["userId"]
             state_manager.remove_user(user_id)
-            logger.info(f"User unfollowed: {user_id}")
+            logger.info(f"Unfollow event received for {user_id} - status cleared")
         else:
-            logger.info(f"Unhandled event type: {event_type}")
+            logger.info(f"Unhandled event type: {event_type} - ignored")
     
     return JSONResponse(content={"status": "ok"}, status_code=200)
 
