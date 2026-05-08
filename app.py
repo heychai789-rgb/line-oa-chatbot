@@ -317,6 +317,14 @@ async def handle_message_event(event: dict):
     # ใช้ per-user lock เพื่อป้องกัน race condition กรณี LINE ส่ง event ซ้ำหรือพร้อมกัน
     lock = get_user_lock(user_id)
     async with lock:
+        # เช็ค inactivity timeout: ถ้าลูกค้าหายไปเกิน 30 นาที ให้ reset สถานะเพื่อให้ AI ตอบได้ใหม่
+        was_reset = state_manager.check_and_reset_if_inactive(user_id)
+        if was_reset:
+            logger.info(f"User {user_id} returned after inactivity - status reset, AI will respond again")
+        
+        # อัปเดต timestamp ของข้อความล่าสุด
+        state_manager.update_last_activity(user_id)
+        
         # ตรวจสอบสถานะแชท - ถ้ามีสถานะอยู่แล้ว ไม่ต้องตอบ
         current_status = state_manager.get_status(user_id)
         if current_status in ["follow_up", "resolved"]:
