@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # LINE API endpoints
 LINE_API_BASE = "https://api.line.me/v2/bot"
@@ -109,6 +111,38 @@ async def send_push(user_id: str, messages: list[dict]):
             logger.error(f"Push failed: {response.status_code} - {response.text}")
         else:
             logger.info("Push sent successfully")
+
+
+async def send_telegram_notification(display_name: str, customer_message: str):
+    """ส่งแจ้งเตือน Telegram เมื่อ AI ตอบลูกค้า."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Telegram credentials not configured, skipping notification")
+        return
+    
+    try:
+        # สร้างข้อความแจ้งเตือน
+        notification_text = (
+            f"🔔 มีลูกค้าทักมา\n"
+            f"ชื่อ: {display_name}\n"
+            f"ข้อความ: {customer_message}\n"
+            f"AI ตอบแล้ว - รอดำเนินการ"
+        )
+        
+        # เรียก Telegram Bot API
+        telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": notification_text,
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(telegram_url, json=payload)
+            if response.status_code != 200:
+                logger.error(f"Telegram notification failed: {response.status_code} - {response.text}")
+            else:
+                logger.info(f"Telegram notification sent successfully")
+    except Exception as e:
+        logger.error(f"Error sending Telegram notification: {e}")
 
 
 async def mark_chat_as_follow_up(user_id: str):
@@ -251,7 +285,7 @@ async def handle_message_event(event: dict):
     # กรณีเป็น sticker → จัดเป็นกรณีที่ 1 (greeting)
     if message_type == "sticker":
         logger.info(f"Sticker received from {user_id}")
-        await handle_greeting(reply_token, user_id)
+        await handle_greeting(reply_token, user_id, "สติ๊กเกอร์")
         return
     
     # กรณีเป็น text message
@@ -260,7 +294,7 @@ async def handle_message_event(event: dict):
         logger.info(f"Text received from {user_id}: {text}")
         
         if not text:
-            await handle_greeting(reply_token, user_id)
+            await handle_greeting(reply_token, user_id, "ข้อความว่าง")
             return
         
         # ตรวจสอบคีย์เวิร์ดก่อน (เร็วกว่า API call)
@@ -272,18 +306,18 @@ async def handle_message_event(event: dict):
         
         # จัดการตามประเภท
         if category == "greeting":
-            await handle_greeting(reply_token, user_id)
+            await handle_greeting(reply_token, user_id, text)
         elif category == "transaction":
-            await handle_transaction(reply_token, user_id)
+            await handle_transaction(reply_token, user_id, text)
         elif category == "angry":
             await handle_angry(reply_token, user_id, text)
         else:
-            await handle_greeting(reply_token, user_id)
+            await handle_greeting(reply_token, user_id, text)
         return
     
     # กรณีอื่นๆ (image, video, audio, location, etc.) → จัดเป็น greeting
     logger.info(f"Other message type '{message_type}' from {user_id}")
-    await handle_greeting(reply_token, user_id)
+    await handle_greeting(reply_token, user_id, f"{message_type} message")
 
 
 def check_keywords(text: str) -> str | None:
@@ -320,7 +354,7 @@ def check_keywords(text: str) -> str | None:
     return None
 
 
-async def handle_greeting(reply_token: str, user_id: str):
+async def handle_greeting(reply_token: str, user_id: str, customer_message: str = "สติ๊กเกอร์/ทักทาย"):
     """กรณีที่ 1: ทักทาย / สติ๊กเกอร์ / ข้อความทั่วไป."""
     messages = [
         {"type": "text", "text": "สวัสดีคะพี่ หนูลินดายินดีให้บริการ"},
@@ -328,16 +362,20 @@ async def handle_greeting(reply_token: str, user_id: str):
     ]
     await send_reply(reply_token, messages)
     await mark_chat_as_follow_up(user_id)
+    # ส่งแจ้งเตือน Telegram
+    await send_telegram_notification(user_id, customer_message)
     logger.info(f"[Case 1 - Greeting] Handled for user: {user_id}")
 
 
-async def handle_transaction(reply_token: str, user_id: str):
+async def handle_transaction(reply_token: str, user_id: str, customer_message: str = ""):
     """กรณีที่ 2: ฝาก/ถอน/เกม/ค้าง/รอนาน."""
     messages = [
-        {"type": "text", "text": "รอสักครู่นะคะ น้องลินดาจะรีบทำรายการให้สักครู่"},
+        {"type": "text", "text": "รอสักครู่นะคะ น้องลินดาจะรีบทำรายการใหสักครู่"},
     ]
     await send_reply(reply_token, messages)
     await mark_chat_as_follow_up(user_id)
+    # ส่งแจ้งเตือน Telegram
+    await send_telegram_notification(user_id, customer_message)
     logger.info(f"[Case 2 - Transaction] Handled for user: {user_id}")
 
 
@@ -349,6 +387,8 @@ async def handle_angry(reply_token: str, user_id: str, text: str):
     ]
     await send_reply(reply_token, messages)
     await mark_chat_as_follow_up(user_id)
+    # ส่งแจ้งเตือน Telegram
+    await send_telegram_notification(user_id, text)
     logger.info(f"[Case 3 - Angry] Handled for user: {user_id}")
 
 
