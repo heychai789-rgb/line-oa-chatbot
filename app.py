@@ -148,8 +148,8 @@ async def get_line_display_name(user_id: str) -> str:
         return user_id
 
 
-async def send_telegram_notification(user_id: str, customer_message: str):
-    """ส่งแจ้งเตือน Telegram เมื่อ AI ตอบลูกค้า."""
+async def send_telegram_notification(user_id: str, customer_message: str, is_urgent: bool = False):
+    """ส่งแจ้งเตือน Telegram เมื่อ AI ตอบลูกค้า พร้อมปุ่ม 'รับเรื่องแล้ว'."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Telegram credentials not configured, skipping notification")
         return
@@ -158,19 +158,40 @@ async def send_telegram_notification(user_id: str, customer_message: str):
         # ดึง display name จาก LINE API (ถ้าไม่ได้จะ fallback เป็น user_id)
         display_name = await get_line_display_name(user_id)
         
-        # สร้างข้อความแจ้งเตือน
-        notification_text = (
-            f"🔔 มีลูกค้าทักมา\n"
-            f"ชื่อ: {display_name}\n"
-            f"ข้อความ: {customer_message}\n"
-            f"AI ตอบแล้ว - รอดำเนินการ"
-        )
+        # สร้างข้อความแจ้งเตือน (แยกรูปแบบตามประเภท)
+        if is_urgent:
+            notification_text = (
+                f"🚨 ด่วน! ลูกค้าไม่พอใจ\n"
+                f"ชื่อ: {display_name}\n"
+                f"ข้อความ: {customer_message}\n"
+                f"AI ตอบแล้ว - รอดำเนินการ"
+            )
+        else:
+            notification_text = (
+                f"🔔 มีลูกค้าทักมา\n"
+                f"ชื่อ: {display_name}\n"
+                f"ข้อความ: {customer_message}\n"
+                f"AI ตอบแล้ว - รอดำเนินการ"
+            )
         
-        # เรียก Telegram Bot API
+        # Inline Keyboard ปุ่ม "รับเรื่องแล้ว" พร้อม user_id ใน callback_data
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ รับเรื่องแล้ว",
+                        "callback_data": f"ack:{user_id}",
+                    }
+                ]
+            ]
+        }
+        
+        # เรียก Telegram Bot API sendMessage
         telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": notification_text,
+            "reply_markup": reply_markup,
         }
         
         async with httpx.AsyncClient() as client:
@@ -178,7 +199,7 @@ async def send_telegram_notification(user_id: str, customer_message: str):
             if response.status_code != 200:
                 logger.error(f"Telegram notification failed: {response.status_code} - {response.text}")
             else:
-                logger.info(f"Telegram notification sent for {display_name}")
+                logger.info(f"Telegram notification sent for {display_name} (urgent={is_urgent})")
     except Exception as e:
         logger.error(f"Error sending Telegram notification: {e}")
 
@@ -436,8 +457,8 @@ async def handle_angry(reply_token: str, user_id: str, text: str):
     ]
     await send_reply(reply_token, messages)
     await mark_chat_as_follow_up(user_id)
-    # ส่งแจ้งเตือน Telegram
-    await send_telegram_notification(user_id, text)
+    # ส่งแจ้งเตือน Telegram แบบ urgent (สำหรับลูกค้าโกรธ)
+    await send_telegram_notification(user_id, text, is_urgent=True)
     logger.info(f"[Case 3 - Angry] Handled for user: {user_id}")
 
 
@@ -534,6 +555,78 @@ async def get_status(user_id: str):
 async def get_stats():
     """ดูสถิติ."""
     return state_manager.get_stats()
+
+
+@app.post("/telegram/callback")
+async def telegram_callback(request: Request):
+    """
+    Telegram Webhook endpoint - รับ callback_query จาก Telegram Bot
+    เมื่อแอดมินกดปุ่ม '✅ รับเรื่องแล้ว' ใน Telegram
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(content={"status": "ok"}, status_code=200)
+
+    # จัดการเฉพาะ callback_query (การกดปุ่ม)
+    callback_query = data.get("callback_query")
+    if not callback_query:
+        # ไม่ใช่ callback อาจเป็น message อื่นๆ ไม่ต้องทำอะไร
+        return JSONResponse(content={"status": "ok"}, status_code=200)
+
+    callback_id = callback_query.get("id", "")
+    callback_data = callback_query.get("data", "")
+    from_user = callback_query.get("from", {})
+    admin_name = from_user.get("first_name", "")
+    admin_last = from_user.get("last_name", "")
+    admin_full = f"{admin_name} {admin_last}".strip() or "Admin"
+    message = callback_query.get("message", {})
+    message_id = message.get("message_id")
+    chat_id = message.get("chat", {}).get("id")
+    original_text = message.get("text", "")
+
+    # ตรวจสอบว่าเป็น callback ประเภท ack:{user_id}
+    if callback_data.startswith("ack:"):
+        line_user_id = callback_data[4:]  # ตัด "ack:" ออก
+        logger.info(f"Admin '{admin_full}' acknowledged case for LINE user: {line_user_id}")
+
+        # เปลี่ยนสถานะ LINE chat เป็น resolved
+        state_manager.set_status(line_user_id, "resolved")
+
+        # แก้ไขข้อความเดิมใน Telegram ให้แสดงว่ารับเรื่องแล้ว
+        updated_text = f"{original_text}\n\n✅ รับเรื่องแล้ว โดย {admin_full}"
+        try:
+            async with httpx.AsyncClient() as client:
+                # แก้ไขข้อความเดิม (editMessageText)
+                edit_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+                edit_payload = {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": updated_text,
+                    "reply_markup": {"inline_keyboard": []},  # ลบปุ่มออก
+                }
+                edit_resp = await client.post(edit_url, json=edit_payload)
+                if edit_resp.status_code != 200:
+                    logger.warning(f"editMessageText failed: {edit_resp.status_code} - {edit_resp.text}")
+
+                # ตอบกลับ Telegram ว่ารับ callback แล้ว (หยุด loading indicator)
+                answer_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+                await client.post(answer_url, json={
+                    "callback_query_id": callback_id,
+                    "text": "✅ รับเรื่องแล้ว!",
+                })
+        except Exception as e:
+            logger.error(f"Error updating Telegram message: {e}")
+    else:
+        # callback ประเภทอื่น ตอบกลับเพื่อหยุด loading indicator
+        try:
+            async with httpx.AsyncClient() as client:
+                answer_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+                await client.post(answer_url, json={"callback_query_id": callback_id})
+        except Exception:
+            pass
+
+    return JSONResponse(content={"status": "ok"}, status_code=200)
 
 
 # =============================================================================
